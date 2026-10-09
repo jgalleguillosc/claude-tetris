@@ -28,6 +28,14 @@ const PIECES = [
 
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
+// Habilidades cargables
+const MAX_ENERGY = 100;
+const ENERGY_PER_LINE = 25;
+const PEEK_COUNT = 5;
+const SLOW_DURATION = 10000; // ms
+const SLOW_FACTOR = 2.5;
+const SKILL_ORDER = ['peek', 'swap', 'slow', 'undo', 'hold'];
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
@@ -39,15 +47,31 @@ const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
+const holdCanvas = document.getElementById('hold-canvas');
+const holdCtx = holdCanvas.getContext('2d');
+const peekSection = document.getElementById('peek-section');
+const peekCanvas = document.getElementById('peek-canvas');
+const peekCtx = peekCanvas.getContext('2d');
+const energyFill = document.getElementById('energy-fill');
+const energyHint = document.getElementById('energy-hint');
+const slowEl = document.getElementById('slow-indicator');
+const skillMenu = document.getElementById('skill-menu');
+const skillButtons = document.querySelectorAll('#skill-menu [data-skill]');
+const skillCancel = document.getElementById('skill-cancel');
+const skillNote = document.getElementById('skill-note');
 
-let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
+let board, current, queue, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
+let energy, menuOpen, holdType, peekLeft, slowTimer, undoSnapshot;
 
 function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
 }
 
 function randomPiece() {
-  const type = Math.floor(Math.random() * 7) + 1;
+  return makePiece(Math.floor(Math.random() * 7) + 1);
+}
+
+function makePiece(type) {
   const shape = PIECES[type].map(row => [...row]);
   return { type, shape, x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2), y: 0 };
 }
@@ -107,7 +131,8 @@ function clearLines() {
     lines += cleared;
     score += (LINE_SCORES[cleared] || 0) * level;
     level = Math.floor(lines / 10) + 1;
-    dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+    dropInterval = intervalForLevel(level);
+    energy = Math.min(MAX_ENERGY, energy + cleared * ENERGY_PER_LINE);
     updateHUD();
   }
 }
@@ -135,25 +160,42 @@ function softDrop() {
   }
 }
 
+function intervalForLevel(lvl) {
+  return Math.max(100, 1000 - (lvl - 1) * 90);
+}
+
 function lockPiece() {
+  undoSnapshot = {
+    board: board.map(row => [...row]),
+    score, lines, level,
+    type: current.type,
+  };
   merge();
   clearLines();
   spawn();
 }
 
 function spawn() {
-  current = next;
-  next = randomPiece();
+  current = queue.shift();
+  while (queue.length < PEEK_COUNT) queue.push(randomPiece());
+  if (peekLeft > 0) peekLeft--;
   if (collide(current.shape, current.x, current.y)) {
     endGame();
   }
   drawNext();
+  drawPeek();
 }
 
 function updateHUD() {
   scoreEl.textContent = score.toLocaleString();
   linesEl.textContent = lines;
   levelEl.textContent = level;
+  const full = energy >= MAX_ENERGY;
+  energyFill.style.width = `${(energy / MAX_ENERGY) * 100}%`;
+  energyFill.classList.toggle('full', full);
+  energyHint.textContent = full ? 'Q: ¡activar!' : `${energy}%`;
+  slowEl.classList.toggle('hidden', slowTimer <= 0);
+  slowEl.textContent = `LENTO ${Math.ceil(slowTimer / 1000)}s`;
 }
 
 function drawBlock(context, x, y, colorIndex, size, alpha) {
@@ -207,10 +249,42 @@ function draw() {
       drawBlock(ctx, current.x + c, current.y + r, current.shape[r][c], BLOCK);
 }
 
+// Dibuja una pieza recortada y centrada en el rectángulo (cx, cy, w, h)
+function drawMini(context, shape, cx, cy, w, h, size) {
+  const rows = [], cols = [];
+  shape.forEach((row, r) => row.forEach((v, c) => {
+    if (v) { rows.push(r); cols.push(c); }
+  }));
+  const minR = Math.min(...rows), maxR = Math.max(...rows);
+  const minC = Math.min(...cols), maxC = Math.max(...cols);
+  const ox = cx + (w - (maxC - minC + 1) * size) / 2;
+  const oy = cy + (h - (maxR - minR + 1) * size) / 2;
+  context.save();
+  context.translate(ox, oy);
+  for (let r = minR; r <= maxR; r++)
+    for (let c = minC; c <= maxC; c++)
+      drawBlock(context, c - minC, r - minR, shape[r][c], size);
+  context.restore();
+}
+
+function drawHold() {
+  holdCtx.clearRect(0, 0, holdCanvas.width, holdCanvas.height);
+  if (holdType) drawMini(holdCtx, PIECES[holdType], 0, 0, holdCanvas.width, holdCanvas.height, 24);
+}
+
+function drawPeek() {
+  peekSection.classList.toggle('hidden', peekLeft <= 0);
+  if (peekLeft <= 0) return;
+  peekCtx.clearRect(0, 0, peekCanvas.width, peekCanvas.height);
+  const slotH = peekCanvas.height / PEEK_COUNT;
+  for (let i = 0; i < PEEK_COUNT; i++)
+    drawMini(peekCtx, queue[i].shape, 0, i * slotH, peekCanvas.width, slotH, 14);
+}
+
 function drawNext() {
   const NB = 30;
   nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
-  const shape = next.shape;
+  const shape = queue[0].shape;
   const offX = Math.floor((4 - shape[0].length) / 2);
   const offY = Math.floor((4 - shape.length) / 2);
   for (let r = 0; r < shape.length; r++)
@@ -240,11 +314,84 @@ function togglePause() {
   }
 }
 
+// ---- Habilidades ----
+function openSkillMenu() {
+  if (paused || gameOver || menuOpen || energy < MAX_ENERGY) return;
+  menuOpen = true;
+  cancelAnimationFrame(animId);
+  skillNote.textContent = undoSnapshot ? '' : 'Deshacer no disponible todavía';
+  skillMenu.classList.remove('hidden');
+}
+
+function closeSkillMenu() {
+  menuOpen = false;
+  skillMenu.classList.add('hidden');
+  lastTime = performance.now();
+  animId = requestAnimationFrame(loop);
+}
+
+function useSkill(name) {
+  if (name === 'undo' && !undoSnapshot) return;
+  switch (name) {
+    case 'peek':
+      peekLeft = PEEK_COUNT + 1; // se descuenta al aparecer la siguiente pieza
+      break;
+    case 'swap': {
+      let type;
+      do { type = Math.floor(Math.random() * 7) + 1; } while (type === current.type);
+      const piece = makePiece(type);
+      piece.y = current.y;
+      piece.x = Math.min(current.x, COLS - piece.shape[0].length);
+      if (collide(piece.shape, piece.x, piece.y)) { piece.x = makePiece(type).x; piece.y = 0; }
+      current = piece;
+      if (collide(current.shape, current.x, current.y)) endGame();
+      break;
+    }
+    case 'slow':
+      slowTimer = SLOW_DURATION;
+      break;
+    case 'undo':
+      // la pieza activa vuelve al frente de la cola y se recupera la colocada
+      queue.unshift(makePiece(current.type));
+      board = undoSnapshot.board;
+      score = undoSnapshot.score;
+      lines = undoSnapshot.lines;
+      level = undoSnapshot.level;
+      dropInterval = intervalForLevel(level);
+      current = makePiece(undoSnapshot.type);
+      undoSnapshot = null;
+      break;
+    case 'hold': {
+      const prev = holdType;
+      holdType = current.type;
+      if (prev) {
+        current = makePiece(prev);
+        if (collide(current.shape, current.x, current.y)) endGame();
+      } else {
+        spawn();
+      }
+      break;
+    }
+  }
+  energy = 0;
+  drawHold();
+  drawNext();
+  drawPeek();
+  updateHUD();
+  if (!gameOver) closeSkillMenu();
+  else skillMenu.classList.add('hidden');
+}
+
 function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
   dropAccum += dt;
-  if (dropAccum >= dropInterval) {
+  if (slowTimer > 0) {
+    slowTimer = Math.max(0, slowTimer - dt);
+    updateHUD();
+  }
+  const interval = slowTimer > 0 ? dropInterval * SLOW_FACTOR : dropInterval;
+  if (dropAccum >= interval) {
     dropAccum = 0;
     if (!collide(current.shape, current.x, current.y + 1)) {
       current.y++;
@@ -266,16 +413,31 @@ function init() {
   dropInterval = 1000;
   dropAccum = 0;
   lastTime = performance.now();
-  next = randomPiece();
+  energy = 0;
+  menuOpen = false;
+  holdType = null;
+  peekLeft = 0;
+  slowTimer = 0;
+  undoSnapshot = null;
+  queue = Array.from({ length: PEEK_COUNT + 1 }, randomPiece);
   spawn();
+  drawHold();
   updateHUD();
   overlay.classList.add('hidden');
+  skillMenu.classList.add('hidden');
   cancelAnimationFrame(animId);
   animId = requestAnimationFrame(loop);
 }
 
 document.addEventListener('keydown', e => {
+  if (menuOpen) {
+    const digit = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
+    if (digit) useSkill(SKILL_ORDER[digit[1] - 1]);
+    else if (e.code === 'Escape' || e.code === 'KeyQ') closeSkillMenu();
+    return;
+  }
   if (e.code === 'KeyP') { togglePause(); return; }
+  if (e.code === 'KeyQ') { openSkillMenu(); return; }
   if (paused || gameOver) return;
   switch (e.code) {
     case 'ArrowLeft':
@@ -299,6 +461,9 @@ document.addEventListener('keydown', e => {
   updateHUD();
 });
 
+skillButtons.forEach(btn =>
+  btn.addEventListener('click', () => useSkill(btn.dataset.skill)));
+skillCancel.addEventListener('click', closeSkillMenu);
 restartBtn.addEventListener('click', init);
 
 init();
