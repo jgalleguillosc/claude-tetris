@@ -13,6 +13,7 @@ const COLORS = [
   '#e57373', // Z - red
   '#7986cb', // J - indigo
   '#ffb74d', // L - orange
+  '#6b6b80', // basura / bloques fijos - gris
 ];
 
 const PIECES = [
@@ -28,6 +29,20 @@ const PIECES = [
 
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
+const GARBAGE = 8;
+const REVERSE_FROM_LEVEL = 5;
+
+// Modos de juego. `time` es un límite (ms), `survive` el tiempo (ms) a sobrevivir,
+// `lines`/`level` son metas a alcanzar.
+const MODES = {
+  classic:   { name: 'Clásico', desc: 'Sin objetivo. Juega hasta perder.' },
+  sprint:    { name: 'Sprint', desc: 'Limpia 40 líneas en 2 minutos.', lines: 40, time: 120000 },
+  garbage:   { name: 'Basura', desc: 'Sobrevive 90 s: sube basura desde abajo cada 10 s.', survive: 90000, garbageEvery: 10000 },
+  preset:    { name: 'Bloques fijos', desc: 'Tablero con bloques pre-colocados. Limpia 15 líneas.', lines: 15, preset: true },
+  invisible: { name: 'Invisibles', desc: 'Las piezas se vuelven invisibles al tocar el suelo. Limpia 10 líneas.', lines: 10, invisible: true },
+  reverse:   { name: 'Rotación inversa', desc: `Desde el nivel ${REVERSE_FROM_LEVEL} la rotación se invierte. Llega al nivel 8.`, level: 8, reverse: true },
+};
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
@@ -39,8 +54,12 @@ const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
+const modeSelect = document.getElementById('mode-select');
+const objectiveEl = document.getElementById('objective');
+const timerEl = document.getElementById('timer');
 
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
+let mode, elapsed, garbageAccum;
 
 function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
@@ -74,8 +93,13 @@ function rotateCW(shape) {
   return result;
 }
 
+function rotateCCW(shape) {
+  return rotateCW(rotateCW(rotateCW(shape)));
+}
+
 function tryRotate() {
-  const rotated = rotateCW(current.shape);
+  const inverted = mode.reverse && level >= REVERSE_FROM_LEVEL;
+  const rotated = inverted ? rotateCCW(current.shape) : rotateCW(current.shape);
   const kicks = [0, -1, 1, -2, 2];
   for (const kick of kicks) {
     if (!collide(rotated, current.x + kick, current.y)) {
@@ -109,7 +133,52 @@ function clearLines() {
     level = Math.floor(lines / 10) + 1;
     dropInterval = Math.max(100, 1000 - (level - 1) * 90);
     updateHUD();
+    checkGoal();
   }
+}
+
+function addGarbageRow() {
+  if (board[0].some(v => v !== 0)) { endGame(false, 'GAME OVER'); return; }
+  board.shift();
+  const hole = Math.floor(Math.random() * COLS);
+  board.push(Array.from({ length: COLS }, (_, c) => (c === hole ? 0 : GARBAGE)));
+  // la pieza actual sube con el tablero; si queda atrapada, se pierde
+  if (collide(current.shape, current.x, current.y)) {
+    current.y--;
+    if (collide(current.shape, current.x, current.y)) endGame(false, 'GAME OVER');
+  }
+}
+
+function applyPreset() {
+  // 5 filas inferiores con bloques fijos y al menos un hueco por fila
+  for (let r = ROWS - 5; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (Math.random() < 0.6) board[r][c] = GARBAGE;
+    }
+    board[r][Math.floor(Math.random() * COLS)] = 0;
+  }
+}
+
+function checkGoal() {
+  if (gameOver) return;
+  if ((mode.lines && lines >= mode.lines) || (mode.level && level >= mode.level)) {
+    endGame(true, '¡OBJETIVO CUMPLIDO!');
+  }
+}
+
+function formatTime(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function updateObjective() {
+  let text = mode.desc;
+  if (mode.lines) text += ` (${Math.min(lines, mode.lines)}/${mode.lines})`;
+  if (mode.level) text += ` (nivel ${level}/${mode.level})`;
+  objectiveEl.textContent = text;
+  if (mode.time) timerEl.textContent = formatTime(mode.time - elapsed);
+  else if (mode.survive) timerEl.textContent = formatTime(mode.survive - elapsed);
+  else timerEl.textContent = formatTime(elapsed);
 }
 
 function ghostY() {
@@ -138,6 +207,7 @@ function softDrop() {
 function lockPiece() {
   merge();
   clearLines();
+  if (gameOver) return;
   spawn();
 }
 
@@ -154,6 +224,7 @@ function updateHUD() {
   scoreEl.textContent = score.toLocaleString();
   linesEl.textContent = lines;
   levelEl.textContent = level;
+  updateObjective();
 }
 
 function drawBlock(context, x, y, colorIndex, size, alpha) {
@@ -192,7 +263,7 @@ function draw() {
   // board
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
-      drawBlock(ctx, c, r, board[r][c], BLOCK);
+      if (!(mode.invisible && board[r][c] !== GARBAGE)) drawBlock(ctx, c, r, board[r][c], BLOCK);
 
   // ghost
   const gy = ghostY();
@@ -218,10 +289,12 @@ function drawNext() {
       drawBlock(nextCtx, offX + c, offY + r, shape[r][c], NB);
 }
 
-function endGame() {
+function endGame(win = false, title = 'GAME OVER') {
+  if (gameOver) return;
   gameOver = true;
   cancelAnimationFrame(animId);
-  overlayTitle.textContent = 'GAME OVER';
+  overlayTitle.classList.toggle('win', win);
+  overlayTitle.textContent = title;
   overlayScore.textContent = `Puntuación: ${score.toLocaleString()}`;
   overlay.classList.remove('hidden');
 }
@@ -234,6 +307,7 @@ function togglePause() {
     loop(lastTime);
   } else {
     cancelAnimationFrame(animId);
+    overlayTitle.classList.remove('win');
     overlayTitle.textContent = 'PAUSA';
     overlayScore.textContent = '';
     overlay.classList.remove('hidden');
@@ -244,6 +318,17 @@ function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
   dropAccum += dt;
+  elapsed += dt;
+  if (mode.garbageEvery) {
+    garbageAccum += dt;
+    if (garbageAccum >= mode.garbageEvery) {
+      garbageAccum -= mode.garbageEvery;
+      addGarbageRow();
+    }
+  }
+  if (!gameOver && mode.survive && elapsed >= mode.survive) endGame(true, '¡SOBREVIVISTE!');
+  if (!gameOver && mode.time && elapsed >= mode.time) endGame(false, 'TIEMPO AGOTADO');
+  if (gameOver) { updateHUD(); draw(); return; }
   if (dropAccum >= dropInterval) {
     dropAccum = 0;
     if (!collide(current.shape, current.x, current.y + 1)) {
@@ -252,12 +337,18 @@ function loop(ts) {
       lockPiece();
     }
   }
+  if (gameOver) { updateHUD(); draw(); return; }
+  updateObjective();
   draw();
   animId = requestAnimationFrame(loop);
 }
 
 function init() {
+  mode = MODES[modeSelect.value];
+  elapsed = 0;
+  garbageAccum = 0;
   board = createBoard();
+  if (mode.preset) applyPreset();
   score = 0;
   lines = 0;
   level = 1;
@@ -300,5 +391,9 @@ document.addEventListener('keydown', e => {
 });
 
 restartBtn.addEventListener('click', init);
+modeSelect.addEventListener('change', () => { modeSelect.blur(); init(); });
+for (const [key, m] of Object.entries(MODES)) {
+  modeSelect.add(new Option(m.name, key));
+}
 
 init();
