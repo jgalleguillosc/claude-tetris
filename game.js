@@ -13,7 +13,26 @@ const COLORS = [
   '#e57373', // Z - red
   '#7986cb', // J - indigo
   '#ffb74d', // L - orange
+  '#9e9e9e', // 8 - comodín
+  '#ff7043', // 9 - bomba
+  '#fff176', // 10 - rayo
+  '#f06292', // 11 - tinte
+  '#a1887f', // 12 - gravedad
+  '#80deea', // 13 - congelar
 ];
+
+// Power-ups: piezas de un solo bloque con efecto especial al aterrizar
+const WILD = 8;
+const POWERUPS = {
+  9:  { name: 'Bomba',    icon: '💣' },
+  10: { name: 'Rayo',     icon: '⚡' },
+  11: { name: 'Tinte',    icon: '🎨' },
+  12: { name: 'Gravedad', icon: '⬇' },
+  13: { name: 'Congelar', icon: '❄' },
+};
+const POWERUP_IDS = Object.keys(POWERUPS).map(Number);
+const POWERUP_EVERY = 5;   // líneas necesarias entre power-ups
+const FREEZE_MS = 5000;
 
 const PIECES = [
   null,
@@ -40,6 +59,7 @@ const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
 
+let powerPending = false, freezeLeft = 0, toastText = '', toastLeft = 0;
 let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 
 function createBoard() {
@@ -47,6 +67,11 @@ function createBoard() {
 }
 
 function randomPiece() {
+  if (powerPending) {
+    powerPending = false;
+    const type = POWERUP_IDS[Math.floor(Math.random() * POWERUP_IDS.length)];
+    return { type, shape: [[type]], x: Math.floor(COLS / 2), y: 0 };
+  }
   const type = Math.floor(Math.random() * 7) + 1;
   const shape = PIECES[type].map(row => [...row]);
   return { type, shape, x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2), y: 0 };
@@ -86,6 +111,53 @@ function tryRotate() {
   }
 }
 
+function applyPowerUp(type, x, y) {
+  switch (type) {
+    case 9: // bomba 3x3
+      for (let r = y - 1; r <= y + 1; r++)
+        for (let c = x - 1; c <= x + 1; c++)
+          if (r >= 0 && r < ROWS && c >= 0 && c < COLS) board[r][c] = 0;
+      break;
+    case 10: // rayo: fila o columna completa
+      if (Math.random() < 0.5) {
+        board[y].fill(0);
+      } else {
+        for (let r = 0; r < ROWS; r++) board[r][x] = 0;
+      }
+      break;
+    case 11: { // tinte: el color más abundante pasa a comodín
+      const counts = {};
+      for (const row of board)
+        for (const v of row)
+          if (v && v !== WILD) counts[v] = (counts[v] || 0) + 1;
+      const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      if (top) {
+        for (const row of board)
+          for (let c = 0; c < COLS; c++)
+            if (row[c] === Number(top)) row[c] = WILD;
+      }
+      break;
+    }
+    case 12: // gravedad: compacta huecos por columna
+      for (let c = 0; c < COLS; c++) {
+        let write = ROWS - 1;
+        for (let r = ROWS - 1; r >= 0; r--) {
+          if (board[r][c]) {
+            const v = board[r][c];
+            board[r][c] = 0;
+            board[write--][c] = v;
+          }
+        }
+      }
+      break;
+    case 13: // congelar
+      freezeLeft = FREEZE_MS;
+      break;
+  }
+  toastText = `${POWERUPS[type].icon} ${POWERUPS[type].name}`;
+  toastLeft = 1500;
+}
+
 function merge() {
   for (let r = 0; r < current.shape.length; r++)
     for (let c = 0; c < current.shape[r].length; c++)
@@ -108,6 +180,8 @@ function clearLines() {
     score += (LINE_SCORES[cleared] || 0) * level;
     level = Math.floor(lines / 10) + 1;
     dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+    if (Math.floor(lines / POWERUP_EVERY) > Math.floor((lines - cleared) / POWERUP_EVERY))
+      powerPending = true;
     updateHUD();
   }
 }
@@ -136,7 +210,8 @@ function softDrop() {
 }
 
 function lockPiece() {
-  merge();
+  if (POWERUPS[current.type]) applyPowerUp(current.type, current.x, current.y);
+  else merge();
   clearLines();
   spawn();
 }
@@ -158,14 +233,30 @@ function updateHUD() {
 
 function drawBlock(context, x, y, colorIndex, size, alpha) {
   if (!colorIndex) return;
-  const color = COLORS[colorIndex];
+  const color = colorIndex === WILD ? wildGradient(context, x, y, size) : COLORS[colorIndex];
   context.globalAlpha = alpha ?? 1;
   context.fillStyle = color;
   context.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
   // highlight
   context.fillStyle = 'rgba(255,255,255,0.12)';
   context.fillRect(x * size + 1, y * size + 1, size - 2, 4);
+  if (POWERUPS[colorIndex]) {
+    context.fillStyle = '#000';
+    context.font = `${Math.floor(size * 0.6)}px sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(POWERUPS[colorIndex].icon, x * size + size / 2, y * size + size / 2 + 1);
+  }
   context.globalAlpha = 1;
+}
+
+function wildGradient(context, x, y, size) {
+  const g = context.createLinearGradient(x * size, y * size, (x + 1) * size, (y + 1) * size);
+  g.addColorStop(0, '#ff8a80');
+  g.addColorStop(0.33, '#ffff8d');
+  g.addColorStop(0.66, '#80d8ff');
+  g.addColorStop(1, '#ea80fc');
+  return g;
 }
 
 function drawGrid() {
@@ -205,6 +296,26 @@ function draw() {
   for (let r = 0; r < current.shape.length; r++)
     for (let c = 0; c < current.shape[r].length; c++)
       drawBlock(ctx, current.x + c, current.y + r, current.shape[r][c], BLOCK);
+
+  // estado de congelación y aviso
+  if (freezeLeft > 0) {
+    ctx.fillStyle = 'rgba(128,222,234,0.12)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#80deea';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`❄ ${(freezeLeft / 1000).toFixed(1)}s`, 8, 8);
+  }
+  if (toastLeft > 0) {
+    ctx.globalAlpha = Math.min(1, toastLeft / 500);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 24px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(toastText, canvas.width / 2, canvas.height / 2);
+    ctx.globalAlpha = 1;
+  }
 }
 
 function drawNext() {
@@ -243,7 +354,9 @@ function togglePause() {
 function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
-  dropAccum += dt;
+  if (toastLeft > 0) toastLeft -= dt;
+  if (freezeLeft > 0) freezeLeft = Math.max(0, freezeLeft - dt);
+  else dropAccum += dt;
   if (dropAccum >= dropInterval) {
     dropAccum = 0;
     if (!collide(current.shape, current.x, current.y + 1)) {
@@ -265,6 +378,9 @@ function init() {
   gameOver = false;
   dropInterval = 1000;
   dropAccum = 0;
+  powerPending = false;
+  freezeLeft = 0;
+  toastLeft = 0;
   lastTime = performance.now();
   next = randomPiece();
   spawn();
