@@ -62,7 +62,6 @@ const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
 
 let powerPending = false, freezeLeft = 0, toastText = '', toastLeft = 0;
-let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 let board, current, next, held, holdUsed, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
 
 function createBoard() {
@@ -76,7 +75,7 @@ function randomPiece() {
     return { type, shape: [[type]], x: Math.floor(COLS / 2), y: 0 };
   }
   const type = Math.floor(Math.random() * 7) + 1;
-  return makePiece(Math.floor(Math.random() * 7) + 1);
+  return makePiece(type);
 }
 
 function makePiece(type) {
@@ -235,7 +234,7 @@ function spawn() {
 }
 
 function holdPiece() {
-  if (holdUsed) return;
+  if (holdUsed || POWERUPS[current.type]) return;
   if (held) {
     const type = current.type;
     current = makePiece(held);
@@ -376,6 +375,7 @@ function togglePause() {
   if (gameOver) return;
   paused = !paused;
   if (!paused) {
+    overlay.classList.add('hidden');
     lastTime = performance.now();
     loop(lastTime);
   } else {
@@ -398,6 +398,7 @@ function loop(ts) {
       current.y++;
     } else {
       lockPiece();
+      if (gameOver) return;
     }
   }
   draw();
@@ -427,6 +428,7 @@ function init() {
 }
 
 document.addEventListener('keydown', e => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', 'Space'].includes(e.code)) e.preventDefault();
   if (e.code === 'KeyP') { togglePause(); return; }
   if (paused || gameOver) return;
   switch (e.code) {
@@ -449,7 +451,6 @@ document.addEventListener('keydown', e => {
       holdPiece();
       break;
     case 'Space':
-      e.preventDefault();
       hardDrop();
       break;
   }
